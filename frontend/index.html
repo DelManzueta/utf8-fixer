@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>UTF-8 Fixer</title>
+<link rel="stylesheet" href="/ui/css/root.css" />
+
+<div class="panel">
+    <h2>UTF-8 Document Fixer (CSV/XLSX) + JSON Comparator</h2>
+
+    <div class="row">
+        <label>Data files (.csv/.xlsx, ≤2MB each):</label>
+        <input id="files" type="file" multiple accept=".csv,.xlsx" />
+    </div>
+
+    <div class="row">
+        <label>Reference JSON (optional):</label>
+        <input id="ref" type="file" accept=".json" />
+    </div>
+
+    <div class="row">
+        <button id="btnUpload">Upload</button>
+        <select id="exportFmt">
+            <option value="csv">Export CSV</option>
+            <option value="xlsx">Export XLSX</option>
+        </select>
+    </div>
+
+    <div class="log" id="log"></div>
+    <div id="filesArea"></div>
+</div>
+
+<script>
+    const log = s => { const el = document.getElementById('log'); el.textContent += s + "\n"; el.scrollTop = el.scrollHeight; };
+    let session = null, uploaded = [], reference = null;
+
+    async function postForm(url, data) {
+        const res = await fetch(url, { method: "POST", body: data });
+        if (!res.ok) { throw new Error(await res.text()); }
+        return res.json();
+    }
+
+    document.getElementById('btnUpload').onclick = async () => {
+        const fd = new FormData();
+        const files = document.getElementById('files').files;
+        if (!files.length) { return log("Select at least one CSV/XLSX."); }
+        for (const f of files) fd.append("files", f);
+        const r = document.getElementById('ref').files[0];
+        if (r) fd.append("reference_json", r);
+        try {
+            const out = await postForm("/api/upload", fd);
+            session = out.session;
+            uploaded = out.files;
+            reference = out.reference;
+            log(`Uploaded. Session: ${session}`);
+            renderFiles();
+        } catch (e) { log("ERR upload: " + e.message); }
+    };
+
+    function renderFiles() {
+        const area = document.getElementById('filesArea');
+        area.innerHTML = uploaded.map(f => `
+    <div class="row">
+      <b>${f.filename}</b>
+      <button onclick="scan('${f.filename}')">Scan</button>
+      <button onclick="apply('${f.filename}')">Change All & Download</button>
+      ${reference ? `<button onclick="compare('${f.filename}')">Compare to JSON</button>` : ""}
+    </div>
+    <div id="issues-${css(f.filename)}"></div>
+  `).join("");
+    }
+    function css(s) { return s.replace(/[^a-z0-9]/gi, '_'); }
+
+    async function scan(filename) {
+        const fd = new FormData();
+        fd.append("session", session);
+        fd.append("filename", filename);
+        try {
+            const out = await postForm("/api/scan", fd);
+            log(`Scan ${filename}: ${out.issues.length} issues found.`);
+            const div = document.getElementById('issues-' + css(filename));
+            div.innerHTML = `
+      <table>
+        <tr><th>#</th><th>Row</th><th>Column</th><th>Before</th><th>After</th></tr>
+        ${out.issues.slice(0, 100).map(i => `
+          <tr><td>${i.id}</td><td>${i.row}</td><td>${i.column}</td><td>${i.before}</td><td>${i.after}</td></tr>
+        `).join("")}
+      </table>
+      ${out.issues.length > 100 ? '<div class="warn">Showing first 100…</div>' : ''}
+    `;
+        } catch (e) { log("ERR scan: " + e.message); }
+    }
+
+    async function apply(filename) {
+        const fd = new FormData();
+        fd.append("session", session);
+        fd.append("filename", filename);
+        fd.append("change_all", "true");
+        fd.append("apply_ids", "[]");
+        fd.append("export", document.getElementById('exportFmt').value);
+        try {
+            const out = await postForm("/api/apply", fd);
+            log(`Applied. Downloading ${out.corrected} & ${out.issues}`);
+            window.open(`/api/download/${session}/${out.corrected}`, "_blank");
+            window.open(`/api/download/${session}/${out.issues}`, "_blank");
+        } catch (e) { log("ERR apply: " + e.message); }
+    }
+
+    async function compare(filename) {
+        const fd = new FormData();
+        fd.append("session", session);
+        fd.append("filename", filename);
+        fd.append("reference", reference);
+        fd.append("export", document.getElementById('exportFmt').value);
+        try {
+            const out = await postForm("/api/compare", fd);
+            log(`Compare meta: missing=${out.meta.missing_count}, extra=${out.meta.extra_count}, samples=${out.meta.sample_count}`);
+            window.open(`/api/download/${session}/${out.report}`, "_blank");
+        } catch (e) { log("ERR compare: " + e.message); }
+    }
+</script>
